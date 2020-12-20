@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+IFS=$'\n\t';
+set -euo pipefail;
+
+usage() {
+	me=${0##*/};
+	cat <<EOF >&2
+$me
+$(echo "$me" | sed 's/./-/g;')
+Merge heart rate data from one TCX file into another.
+Don't know of any way to do this just with XSLT, so
+brute-forcing it instead.
+
+usage:
+$me heart_rate_tcx_file main_workout_tcx_file
+EOF
+
+exit 1;
+}
+
+
+hrFile=${1:-};
+woFile=${2:-};
+if [ ! -f "$hrFile" ] || [ ! -f "$woFile" ]
+then
+	usage;
+fi;
+
+
+hrNode="HeartRateBpm";
+# will process the XML with awk, so make sure it's formatted nicely
+pretty='
+<xsl:stylesheet version="1.0"
+	xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+	xmlns:gar="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"
+>
+	<xsl:output method="xml" omit-xml-declaration="no" indent="yes" />
+
+	<!-- <xsl:template match="gar:HRNODE" /> -->
+
+	<xsl:template match="@*|node()">
+		<xsl:copy>
+			<xsl:apply-templates select="@*|node()"/>
+		</xsl:copy>
+	</xsl:template>
+
+</xsl:stylesheet>';
+pretty="${pretty//^/\'}";
+pretty="${pretty//HRNODE/$hrNode}";
+
+# modify to strip out existing Heart Rate info (for workout file)
+prettyNoHR="${pretty/<!-- }";
+prettyNoHR="${prettyNoHR/ -->}";
+(
+	xsltproc <(echo "$pretty"    ) "$hrFile";
+	xsltproc <(echo "$prettyNoHR") "$woFile";
+) |
+awk -v hrNode="$hrNode" '
+/<\?xml / {loc++;}
+
+/<Trackpoint/ {inPoint = 1;}
+
+inPoint && /<Time>/ {
+	dt = $0;
+	sub(/.*<Time>/,"",dt);
+	dt = substr(dt,1,19);
+}
+
+inPoint && $0 ~ "<" hrNode {
+	hrData = $0;
+	do {
+		getline;
+		hrData = hrData "\n" $0;
+	} while ($0 !~ "\/" hrNode ">");
+}
+
+inPoint && /\/Trackpoint>/ {
+	if (loc == 1) {hr[dt] = hrData;}
+	else if (loc == 2) {print hr[dt];}
+	inPoint = 0;
+}
+
+loc == 2 {print;}
+';
+
